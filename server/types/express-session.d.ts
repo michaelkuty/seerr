@@ -5,5 +5,7 @@ import 'express-session';
 declare module 'express-session' {
   interface SessionData {
     userId: number;
+    /** OIDC state/nonce/code_verifier for callback (Authorization Code + PKCE). */
+    oidcPending?: { state: string; nonce: string; codeVerifier: string };
   }
 }

@@ -1834,7 +1834,7 @@ components:
                 example: banner
               url:
                 type: string
-                example: /sonarr/MediaCoverProxy/6467f05d9872726ad08cbf920e5fee4bf69198682260acab8eab5d3c2c958e92/5c8f116c6aa5c.jpg
+                example: /sonarr/MediaCoverProxy/IMAGE_CACHE_KEY/FILENAME.jpg
         remotePoster:
           type: string
           example: https://artworks.thetvdb.com/banners/posters/5c8f116129983.jpg
@@ -2246,6 +2246,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NetworkSettings'
+  /settings/oidc:
+    get:
+      summary: Get OIDC settings
+      description: Retrieves OIDC/SSO settings. Client secret is masked.
+      tags:
+        - settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+    post:
+      summary: Update OIDC settings
+      description: Updates OIDC/SSO settings.
+      tags:
+        - settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Values were successfully updated
+          content:
+            application/json:
+              schema:
+                type: object
   /settings/main/regenerate:
     post:
       summary: Get main settings with newly-generated API key
@@ -3925,6 +3955,41 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/User'
+  /auth/accounts:
+    get:
+      summary: List linked auth accounts
+      description: Returns linked OAuth/OIDC accounts for the current user.
+      tags:
+        - auth
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        providerId:
+                          type: string
+                        accountId:
+                          type: string
+  /auth/oidc/sync:
+    get:
+      summary: OIDC callback sync
+      description: Callback after OIDC sign-in; syncs Better Auth session to Seerr and redirects.
+      security: []
+      tags:
+        - auth
+      responses:
+        '302':
+          description: Redirect to application root
+        '307':
+          description: Redirect to login on failure
   /auth/plex:
     post:
       summary: Sign in using a Plex token

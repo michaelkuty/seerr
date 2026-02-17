@@ -28,6 +28,7 @@ const messages = defineMessages('components.Login', {
   signinwithplex: 'Use your Plex account',
   signinwithjellyfin: 'Use your {mediaServerName} account',
   signinwithoverseerr: 'Use your {applicationTitle} account',
+  signinwithoidc: 'Sign in with {name}',
   orsigninwith: 'Or sign in with',
 });
 
@@ -106,10 +107,33 @@ const Login = () => {
   const localLoginRef = useRef<HTMLDivElement>(null);
   const loginRef = mediaServerLogin ? mediaServerLoginRef : localLoginRef;
 
+  const [oidcLoading, setOidcLoading] = useState(false);
+  const handleOidcSignIn = () => {
+    setOidcLoading(true);
+    setError('');
+    window.location.href = '/api/v1/auth/oidc';
+  };
+
   const loginFormVisible =
     (isJellyfin && settings.currentSettings.mediaServerLogin) ||
     settings.currentSettings.localLogin;
   const additionalLoginOptions = [
+    settings.currentSettings.oidcLogin && (
+      <Button
+        key="oidc"
+        type="button"
+        className="flex-1 bg-transparent"
+        data-testid="oidc-login-button"
+        onClick={handleOidcSignIn}
+        disabled={oidcLoading}
+      >
+        {oidcLoading
+          ? intl.formatMessage(messages.signinheader)
+          : intl.formatMessage(messages.signinwithoidc, {
+              name: settings.currentSettings.oidcDisplayName || 'OIDC',
+            })}
+      </Button>
+    ),
     settings.currentSettings.mediaServerLogin &&
       (settings.currentSettings.mediaServerType === MediaServerType.PLEX ? (
         <PlexLoginButton

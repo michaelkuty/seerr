@@ -33,6 +33,9 @@ export interface PublicSettingsResponse {
   hideBlocklisted: boolean;
   localLogin: boolean;
   mediaServerLogin: boolean;
+  oidcLogin: boolean;
+  oidcDisplayName: string;
+  oidcScopes: string[];
   movie4kEnabled: boolean;
   series4kEnabled: boolean;
   discoverRegion: string;

@@ -31,6 +31,8 @@ const messages = defineMessages('components.Settings.SettingsUsers', {
   mediaServerLogin: 'Enable {mediaServerName} Sign-In',
   mediaServerLoginTip:
     'Allow users to sign in using their {mediaServerName} account',
+  oidcLogin: 'Enable OIDC / SSO Sign-In',
+  oidcLoginTip: 'Allow users to sign in using the configured OIDC provider',
   atLeastOneAuth: 'At least one authentication method must be selected.',
   newPlexLogin: 'Enable New {mediaServerName} Sign-In',
   newPlexLoginTip:
@@ -56,17 +58,18 @@ const SettingsUsers = () => {
     .shape({
       localLogin: yup.boolean(),
       mediaServerLogin: yup.boolean(),
+      oidcLogin: yup.boolean(),
     })
     .test({
       name: 'atLeastOneAuth',
       test: function (values) {
-        const isValid = ['localLogin', 'mediaServerLogin'].some(
+        const isValid = ['localLogin', 'mediaServerLogin', 'oidcLogin'].some(
           (field) => !!values[field]
         );
 
         if (isValid) return true;
         return this.createError({
-          path: 'localLogin | mediaServerLogin',
+          path: 'localLogin | mediaServerLogin | oidcLogin',
           message: intl.formatMessage(messages.atLeastOneAuth),
         });
       },
@@ -106,6 +109,7 @@ const SettingsUsers = () => {
           initialValues={{
             localLogin: data?.localLogin,
             mediaServerLogin: data?.mediaServerLogin,
+            oidcLogin: data?.oidcLogin,
             newPlexLogin: data?.newPlexLogin,
             movieQuotaLimit: data?.defaultQuotas.movie.quotaLimit ?? 0,
             movieQuotaDays: data?.defaultQuotas.movie.quotaDays ?? 7,
@@ -120,6 +124,7 @@ const SettingsUsers = () => {
               await axios.post('/api/v1/settings/main', {
                 localLogin: values.localLogin,
                 mediaServerLogin: values.mediaServerLogin,
+                oidcLogin: values.oidcLogin,
                 newPlexLogin: values.newPlexLogin,
                 defaultQuotas: {
                   movie: {
@@ -163,9 +168,14 @@ const SettingsUsers = () => {
                       <span className="label-tip">
                         {intl.formatMessage(messages.loginMethodsTip)}
                       </span>
-                      {'localLogin | mediaServerLogin' in errors && (
+                      {'localLogin | mediaServerLogin | oidcLogin' in
+                        errors && (
                         <span className="error">
-                          {errors['localLogin | mediaServerLogin'] as string}
+                          {
+                            errors[
+                              'localLogin | mediaServerLogin | oidcLogin'
+                            ] as string
+                          }
                         </span>
                       )}
                     </span>
@@ -198,6 +208,15 @@ const SettingsUsers = () => {
                             'mediaServerLogin',
                             !values.mediaServerLogin
                           )
+                        }
+                      />
+                      <LabeledCheckbox
+                        id="oidcLogin"
+                        className="mt-4"
+                        label={intl.formatMessage(messages.oidcLogin)}
+                        description={intl.formatMessage(messages.oidcLoginTip)}
+                        onChange={() =>
+                          setFieldValue('oidcLogin', !values.oidcLogin)
                         }
                       />
                     </div>

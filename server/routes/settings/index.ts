@@ -20,7 +20,15 @@ import ImageProxy from '@server/lib/imageproxy';
 import { Permission } from '@server/lib/permissions';
 import { jellyfinFullScanner } from '@server/lib/scanners/jellyfin';
 import { plexFullScanner } from '@server/lib/scanners/plex';
-import type { JobId, Library, MainSettings } from '@server/lib/settings';
+import type {
+  JellyfinSettings,
+  JobId,
+  Library,
+  MainSettings,
+  OidcSettings,
+  PlexSettings,
+  TautulliSettings,
+} from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -34,7 +42,7 @@ import type { DnsEntries, DnsStats } from 'dns-caching';
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import fs from 'fs';
-import { escapeRegExp, merge, omit, set, sortBy } from 'lodash';
+import { merge, omit, set, sortBy } from 'lodash';
 import { rescheduleJob } from 'node-schedule';
 import path from 'path';
 import semver from 'semver';
@@ -45,6 +53,85 @@ import radarrRoutes from './radarr';
 import sonarrRoutes from './sonarr';
 
 const settingsRoutes = Router();
+
+const ALLOWED_PLEX_KEYS: (keyof PlexSettings)[] = [
+  'name',
+  'machineId',
+  'ip',
+  'port',
+  'useSsl',
+  'libraries',
+  'webAppUrl',
+];
+const ALLOWED_JELLYFIN_KEYS: (keyof JellyfinSettings)[] = [
+  'name',
+  'ip',
+  'port',
+  'useSsl',
+  'urlBase',
+  'externalHostname',
+  'jellyfinForgotPasswordUrl',
+  'libraries',
+  'serverId',
+  'apiKey',
+];
+const ALLOWED_TAUTULLI_KEYS: (keyof TautulliSettings)[] = [
+  'hostname',
+  'port',
+  'useSsl',
+  'urlBase',
+  'apiKey',
+  'externalUrl',
+];
+const OIDC_KEYS: (keyof OidcSettings)[] = [
+  'issuerUrl',
+  'useDiscovery',
+  'authorizationUrl',
+  'tokenUrl',
+  'userInfoUrl',
+  'issuer',
+  'clientId',
+  'clientSecret',
+  'displayName',
+  'groupsClaim',
+  'nameClaim',
+  'emailClaim',
+  'groupMappings',
+  'claimsToSync',
+  'scopes',
+];
+
+function mergeAllowedKeys<T extends object>(
+  target: T,
+  source: unknown,
+  allowedKeys: (keyof T)[]
+): void {
+  if (!source || typeof source !== 'object') return;
+  const obj = source as Record<string, unknown>;
+  const t = target as Record<string, unknown>;
+  for (const key of allowedKeys) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      t[key as string] = obj[key as string];
+    }
+  }
+}
+
+function pickAllowedKeys<T extends object>(
+  source: unknown,
+  allowedKeys: (keyof T)[]
+): Partial<T> {
+  const out: Record<string, unknown> = {};
+  if (!source || typeof source !== 'object') return out as Partial<T>;
+  const obj = source as Record<string, unknown>;
+  for (const key of allowedKeys) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      out[key as string] = obj[key as string];
+    }
+  }
+  return out as Partial<T>;
+}
+
+const MAX_LOG_SEARCH_LENGTH = 200;
 
 settingsRoutes.use('/notifications', notificationRoutes);
 settingsRoutes.use('/radarr', radarrRoutes);
@@ -80,6 +167,73 @@ settingsRoutes.post('/main', async (req, res) => {
   await settings.save();
 
   return res.status(200).json(settings.main);
+});
+
+function maskOidcSecret(oidc: OidcSettings): OidcSettings {
+  if (!oidc?.clientSecret) return oidc ?? ({} as OidcSettings);
+  return { ...oidc, clientSecret: '********' };
+}
+
+settingsRoutes.get('/oidc', (_req, res) => {
+  const settings = getSettings();
+  res.status(200).json(maskOidcSecret(settings.oidc));
+});
+
+settingsRoutes.post('/oidc', async (req, res, next) => {
+  const settings = getSettings();
+  const body = pickAllowedKeys<OidcSettings>(req.body, OIDC_KEYS);
+  const merged = merge({}, settings.oidc, body);
+  if (
+    body.clientSecret === '********' ||
+    (body.clientSecret === '' && settings.oidc?.clientSecret)
+  ) {
+    merged.clientSecret = settings.oidc?.clientSecret ?? '';
+  }
+  const oidcLogin =
+    typeof req.body?.oidcLogin === 'boolean'
+      ? req.body.oidcLogin
+      : settings.main.oidcLogin;
+  const useDiscovery = merged.useDiscovery !== false;
+  const willEnableOidc = useDiscovery
+    ? !!merged.issuerUrl?.trim() &&
+      !!merged.clientId?.trim() &&
+      !!merged.clientSecret?.trim()
+    : !!merged.authorizationUrl?.trim() &&
+      !!merged.tokenUrl?.trim() &&
+      !!merged.clientId?.trim() &&
+      !!merged.clientSecret?.trim();
+  if (oidcLogin || willEnableOidc) {
+    if (!merged.clientId?.trim()) {
+      return next({
+        status: 400,
+        message: 'OIDC requires client ID when enabled.',
+      });
+    }
+    if (!merged.clientSecret?.trim()) {
+      return next({
+        status: 400,
+        message: 'OIDC requires client secret when enabled.',
+      });
+    }
+    if (useDiscovery && !merged.issuerUrl?.trim()) {
+      return next({
+        status: 400,
+        message: 'OIDC discovery requires issuer URL when enabled.',
+      });
+    }
+    if (!useDiscovery) {
+      if (!merged.authorizationUrl?.trim() || !merged.tokenUrl?.trim()) {
+        return next({
+          status: 400,
+          message:
+            'OIDC manual mode requires authorization URL and token URL when enabled.',
+        });
+      }
+    }
+  }
+  settings.oidc = merged;
+  await settings.save();
+  return res.status(200).json(maskOidcSecret(settings.oidc));
 });
 
 settingsRoutes.get('/network', (req, res) => {
@@ -124,7 +278,7 @@ settingsRoutes.post('/plex', async (req, res, next) => {
       where: { id: 1 },
     });
 
-    Object.assign(settings.plex, req.body);
+    mergeAllowedKeys(settings.plex, req.body, ALLOWED_PLEX_KEYS);
 
     const plexClient = new PlexAPI({ plexToken: admin.plexToken });
 
@@ -298,7 +452,7 @@ settingsRoutes.post('/jellyfin', async (req, res, next) => {
       throw new ApiError(result?.status, ApiErrorCode.InvalidUrl);
     }
 
-    Object.assign(settings.jellyfin, req.body);
+    mergeAllowedKeys(settings.jellyfin, req.body, ALLOWED_JELLYFIN_KEYS);
     settings.jellyfin.serverId = result.Id;
     settings.jellyfin.name = result.ServerName;
     await settings.save();
@@ -441,7 +595,7 @@ settingsRoutes.get('/tautulli', (_req, res) => {
 settingsRoutes.post('/tautulli', async (req, res, next) => {
   const settings = getSettings();
 
-  Object.assign(settings.tautulli, req.body);
+  mergeAllowedKeys(settings.tautulli, req.body, ALLOWED_TAUTULLI_KEYS);
 
   if (settings.tautulli.hostname) {
     try {
@@ -538,8 +692,12 @@ settingsRoutes.get(
   (req, res, next) => {
     const pageSize = req.query.take ? Number(req.query.take) : 25;
     const skip = req.query.skip ? Number(req.query.skip) : 0;
-    const search = (req.query.search as string) ?? '';
-    const searchRegexp = new RegExp(escapeRegExp(search), 'i');
+    const searchRaw = (req.query.search as string) ?? '';
+    const search = searchRaw.slice(0, MAX_LOG_SEARCH_LENGTH);
+    const searchLower = search.toLowerCase();
+
+    const searchMatches = (text: string): boolean =>
+      text.toLowerCase().includes(searchLower);
 
     let filter: string[] = [];
     switch (req.query.filter) {
@@ -613,12 +771,9 @@ settingsRoutes.get(
 
           if (req.query.search) {
             if (
-              // label and data are sometimes undefined
-              !searchRegexp.test(logMessage.label ?? '') &&
-              !searchRegexp.test(logMessage.message) &&
-              !deepValueStrings(logMessage.data ?? {}).some((val) =>
-                searchRegexp.test(val)
-              )
+              !searchMatches(logMessage.label ?? '') &&
+              !searchMatches(logMessage.message) &&
+              !deepValueStrings(logMessage.data ?? {}).some(searchMatches)
             ) {
               return;
             }

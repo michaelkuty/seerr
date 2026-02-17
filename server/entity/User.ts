@@ -91,6 +91,15 @@ export class User {
   @Column({ type: 'varchar', nullable: true, select: false })
   public plexToken?: string | null;
 
+  @Column({ type: 'varchar', nullable: true })
+  public oidcSub?: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  public oidcIssuer?: string | null;
+
+  @Column({ type: 'simple-json', nullable: true })
+  public oidcClaims?: Record<string, unknown> | null;
+
   @Column({ type: 'integer', default: 0 })
   public permissions = 0;
 

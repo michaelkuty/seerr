@@ -4,9 +4,16 @@ import { ApiErrorCode } from '@server/constants/error';
 import { MediaServerType, ServerType } from '@server/constants/server';
 import { UserType } from '@server/constants/user';
 import { getRepository } from '@server/datasource';
+import { OidcAccount } from '@server/entity/OidcAccount';
 import { User } from '@server/entity/User';
 import { startJobs } from '@server/job/schedule';
+import {
+  createOidcPending,
+  getAuthorizationUrl,
+  handleCallback,
+} from '@server/lib/oidc';
 import { Permission } from '@server/lib/permissions';
+import type { OidcGroupMapping } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -16,10 +23,351 @@ import { getAppVersion } from '@server/utils/appVersion';
 import { getHostname } from '@server/utils/getHostname';
 import axios from 'axios';
 import { Router } from 'express';
+import gravatarUrl from 'gravatar-url';
 import net from 'net';
 import validator from 'validator';
 
 const authRoutes = Router();
+
+const LOGIN_ERROR_REDIRECT = '/login?error=auth_failed';
+
+/** Origin (scheme + host) of the configured OIDC issuer for redirect allowlist. */
+function getOidcIssuerOrigin(oidc: {
+  issuerUrl?: string;
+  issuer?: string;
+  authorizationUrl?: string;
+}): string | null {
+  const raw =
+    oidc.issuerUrl?.trim() ||
+    oidc.issuer?.trim() ||
+    oidc.authorizationUrl?.trim();
+  if (!raw) return null;
+  try {
+    const u = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
+// function decodeJwtPayload(token: string): Record<string, unknown> | null {
+//   try {
+//     const parts = token.split('.');
+//     if (parts.length !== 3) return null;
+//     const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+//     const decoded = Buffer.from(payload, 'base64').toString('utf-8');
+//     return JSON.parse(decoded) as Record<string, unknown>;
+//   } catch {
+//     return null;
+//   }
+// }
+
+function groupsFromClaims(
+  claims: Record<string, unknown>,
+  groupsClaim: string
+): string[] {
+  const raw = claims[groupsClaim];
+  if (Array.isArray(raw)) {
+    return raw.filter((v): v is string => typeof v === 'string');
+  }
+  if (typeof raw === 'string') return [raw];
+  return [];
+}
+
+function computePermissionsFromGroups(
+  groups: string[],
+  groupMappings: OidcGroupMapping[],
+  defaultPermissions: number
+): number {
+  if (!groupMappings.length || !groups.length) return defaultPermissions;
+  let permissions = 0;
+  const groupSet = new Set(groups.map((g) => g.trim().toLowerCase()));
+  for (const { oidcGroup, permissions: perm } of groupMappings) {
+    if (groupSet.has(oidcGroup.trim().toLowerCase())) {
+      permissions |= perm;
+    }
+  }
+  return permissions || defaultPermissions;
+}
+
+/** Build object of claims to store from token; only keys in claimsToSync, JSON-serializable. */
+function buildSyncedClaims(
+  claims: Record<string, unknown>,
+  claimsToSync: string[]
+): Record<string, unknown> | null {
+  if (!Array.isArray(claimsToSync) || claimsToSync.length === 0) return null;
+  const out: Record<string, unknown> = {};
+  for (const key of claimsToSync) {
+    const k = typeof key === 'string' ? key.trim() : '';
+    if (!k || claims[k] === undefined) continue;
+    out[k] = claims[k];
+  }
+  if (Object.keys(out).length === 0) return null;
+  try {
+    JSON.stringify(out);
+  } catch {
+    return null;
+  }
+  return out;
+}
+
+async function findOrCreateSeerrUserFromOidc(
+  oidcSub: string,
+  oidcIssuer: string,
+  email: string,
+  name: string | null,
+  permissionsFromGroups: number | null,
+  oidcClaims: Record<string, unknown> | null
+): Promise<User> {
+  const userRepository = getRepository(User);
+  const settings = getSettings();
+  const normalizedEmail = email?.toLowerCase() ?? '';
+
+  let user = await userRepository.findOne({
+    where: { oidcSub, oidcIssuer },
+  });
+  if (user) {
+    let changed = false;
+    if (
+      permissionsFromGroups !== null &&
+      user.permissions !== permissionsFromGroups
+    ) {
+      user.permissions = permissionsFromGroups;
+      changed = true;
+    }
+    if (oidcClaims !== null) {
+      user.oidcClaims = oidcClaims;
+      changed = true;
+    }
+    if (normalizedEmail && user.email !== normalizedEmail) {
+      user.email = normalizedEmail;
+      changed = true;
+    }
+    if (name && user.username !== name) {
+      user.username = name;
+      changed = true;
+    }
+    if (changed) await userRepository.save(user);
+    return user;
+  }
+
+  if (normalizedEmail) {
+    user = await userRepository.findOne({
+      where: { email: normalizedEmail },
+    });
+    if (user) {
+      user.oidcSub = oidcSub;
+      user.oidcIssuer = oidcIssuer;
+      user.userType = UserType.OIDC;
+      if (name) user.username = name;
+      if (permissionsFromGroups !== null)
+        user.permissions = permissionsFromGroups;
+      if (oidcClaims !== null) user.oidcClaims = oidcClaims;
+      await userRepository.save(user);
+      return user;
+    }
+  }
+
+  const isFirstUser = (await userRepository.count()) === 0;
+  const permissions =
+    permissionsFromGroups !== null
+      ? permissionsFromGroups
+      : isFirstUser
+        ? Permission.ADMIN
+        : settings.main.defaultPermissions;
+  const newUser = new User({
+    email: normalizedEmail || `oidc-${oidcSub}@placeholder.local`,
+    userType: UserType.OIDC,
+    permissions,
+    avatar: gravatarUrl(normalizedEmail || 'none', {
+      default: 'mm',
+      size: 200,
+    }),
+    oidcSub,
+    oidcIssuer,
+    username: name ?? undefined,
+    oidcClaims: oidcClaims ?? undefined,
+  });
+  await userRepository.save(newUser);
+  return newUser;
+}
+
+authRoutes.get('/oidc', async (req, res) => {
+  const settings = getSettings();
+  const oidcSettings = settings.oidc;
+  if (
+    !oidcSettings?.clientId?.trim() ||
+    (!oidcSettings.useDiscovery && !oidcSettings.authorizationUrl?.trim())
+  ) {
+    return res.redirect(LOGIN_ERROR_REDIRECT);
+  }
+  const baseUrl = settings.main?.applicationUrl?.trim() || '';
+  const applicationUrl =
+    baseUrl || `${req.protocol}://${req.get('host') ?? ''}`;
+  const redirectUri = `${applicationUrl.replace(/\/?$/, '')}/api/v1/auth/oidc/sync`;
+  try {
+    const pending = createOidcPending();
+    if (req.session) {
+      req.session.oidcPending = pending;
+    }
+    const url = await getAuthorizationUrl(oidcSettings, redirectUri, pending);
+    const issuerOrigin = getOidcIssuerOrigin(oidcSettings);
+    if (issuerOrigin && url.origin !== issuerOrigin) {
+      logger.warn('OIDC redirect rejected: URL origin not in allowlist', {
+        label: 'Auth',
+        urlOrigin: url.origin,
+        expectedOrigin: issuerOrigin,
+      });
+      return res.redirect(LOGIN_ERROR_REDIRECT);
+    }
+    // Redirect target validated above: url.origin must match configured OIDC issuer (allowlist)
+    return res.redirect(url.toString());
+  } catch (e) {
+    logger.warn('OIDC redirect failed', {
+      label: 'Auth',
+      message: (e as Error).message,
+    });
+    return res.redirect(LOGIN_ERROR_REDIRECT);
+  }
+});
+
+authRoutes.get('/oidc/sync', async (req, res) => {
+  const settings = getSettings();
+  const oidcSettings = settings.oidc;
+  const pending = req.session?.oidcPending;
+  const code = typeof req.query.code === 'string' ? req.query.code : undefined;
+  const state =
+    typeof req.query.state === 'string' ? req.query.state : undefined;
+  if (!oidcSettings?.clientId?.trim() || !pending || !code || !state) {
+    if (req.session) delete req.session.oidcPending;
+    return res.redirect(LOGIN_ERROR_REDIRECT);
+  }
+  const baseUrl = settings.main?.applicationUrl?.trim() || '';
+  const applicationUrl =
+    baseUrl || `${req.protocol}://${req.get('host') ?? ''}`;
+  const redirectUri = `${applicationUrl.replace(/\/?$/, '')}/api/v1/auth/oidc/sync`;
+  try {
+    const callbackUrl = new URL(req.originalUrl, applicationUrl);
+    const result = await handleCallback(
+      oidcSettings,
+      redirectUri,
+      callbackUrl,
+      pending
+    );
+    if (req.session) delete req.session.oidcPending;
+
+    const groupsClaim = oidcSettings?.groupsClaim?.trim() || 'groups';
+    const nameClaim = oidcSettings?.nameClaim?.trim() || 'name';
+    const emailClaim = oidcSettings?.emailClaim?.trim() || 'email';
+    const groupMappings = Array.isArray(oidcSettings?.groupMappings)
+      ? oidcSettings.groupMappings
+      : [];
+    const claimsToSync = Array.isArray(oidcSettings?.claimsToSync)
+      ? oidcSettings.claimsToSync.filter(
+          (c): c is string => typeof c === 'string'
+        )
+      : [];
+
+    const email =
+      (result.claims[emailClaim] as string) ??
+      (result.claims.email as string) ??
+      '';
+    const name: string | null =
+      (result.claims[nameClaim] as string) ??
+      (result.claims.name as string) ??
+      null;
+    const groups = groupsFromClaims(
+      result.claims as Record<string, unknown>,
+      groupsClaim
+    );
+    const permissionsFromGroups =
+      groups.length || groupMappings.length
+        ? computePermissionsFromGroups(
+            groups,
+            groupMappings,
+            settings.main.defaultPermissions
+          )
+        : null;
+    const oidcClaims = buildSyncedClaims(
+      result.claims as Record<string, unknown>,
+      claimsToSync
+    );
+
+    const oidcIssuer =
+      oidcSettings.useDiscovery && oidcSettings.issuerUrl?.trim()
+        ? oidcSettings.issuerUrl.replace(/\/?$/, '')
+        : (oidcSettings.issuer?.trim() ?? '');
+
+    const user = await findOrCreateSeerrUserFromOidc(
+      result.sub,
+      oidcIssuer,
+      email,
+      name,
+      permissionsFromGroups,
+      oidcClaims
+    );
+
+    const oidcAccountRepo = getRepository(OidcAccount);
+    const expiresAt = result.expiresIn
+      ? new Date(Date.now() + result.expiresIn * 1000)
+      : null;
+    let account = await oidcAccountRepo.findOne({
+      where: { userId: user.id, issuer: oidcIssuer, sub: result.sub },
+    });
+    if (account) {
+      account.accessToken = result.accessToken ?? null;
+      account.refreshToken = result.refreshToken ?? null;
+      account.idToken = result.idToken ?? null;
+      account.accessTokenExpiresAt = expiresAt;
+      account.updatedAt = new Date();
+      await oidcAccountRepo.save(account);
+    } else {
+      account = oidcAccountRepo.create({
+        userId: user.id,
+        issuer: oidcIssuer,
+        sub: result.sub,
+        accessToken: result.accessToken ?? null,
+        refreshToken: result.refreshToken ?? null,
+        idToken: result.idToken ?? null,
+        accessTokenExpiresAt: expiresAt,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await oidcAccountRepo.save(account);
+    }
+
+    if (req.session) {
+      req.session.userId = user.id;
+    }
+    const redirectTo = baseUrl ? `${baseUrl.replace(/\/?$/, '')}/` : '/';
+    return res.redirect(redirectTo);
+  } catch (e) {
+    logger.warn('OIDC sync failed', {
+      label: 'Auth',
+      message: (e as Error).message,
+    });
+    if (req.session) delete req.session.oidcPending;
+    return res.redirect(LOGIN_ERROR_REDIRECT);
+  }
+});
+
+authRoutes.get('/accounts', isAuthenticated(), async (req, res) => {
+  if (!req.user?.id) {
+    return res.status(200).json({ accounts: [] });
+  }
+  const oidcAccountRepo = getRepository(OidcAccount);
+  const list = await oidcAccountRepo.find({
+    where: { userId: req.user.id },
+    select: { id: true, issuer: true, sub: true, createdAt: true },
+  });
+  const accounts = list.map((a) => ({
+    id: a.id,
+    providerId: 'oidc',
+    accountId: a.sub,
+    createdAt: a.createdAt,
+  }));
+  return res.status(200).json({ accounts });
+});
 
 authRoutes.get('/me', isAuthenticated(), async (req, res) => {
   const userRepository = getRepository(User);

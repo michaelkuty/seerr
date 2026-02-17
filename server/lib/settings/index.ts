@@ -135,6 +135,7 @@ export interface MainSettings {
   hideBlocklisted: boolean;
   localLogin: boolean;
   mediaServerLogin: boolean;
+  oidcLogin: boolean;
   newPlexLogin: boolean;
   discoverRegion: string;
   streamingRegion: string;
@@ -146,6 +147,40 @@ export interface MainSettings {
   enableSpecialEpisodes: boolean;
   locale: string;
   youtubeUrl: string;
+}
+
+export interface OidcGroupMapping {
+  oidcGroup: string;
+  permissions: number;
+}
+
+export interface OidcSettings {
+  issuerUrl: string;
+  /** If true, use OIDC discovery from Issuer URL; if false, use manual endpoints. */
+  useDiscovery: boolean;
+  /** Manual mode: authorization endpoint URL. */
+  authorizationUrl: string;
+  /** Manual mode: token endpoint URL. */
+  tokenUrl: string;
+  /** Manual mode: optional userinfo endpoint URL. */
+  userInfoUrl: string;
+  /** Manual mode: issuer value for token validation. */
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+  displayName: string;
+  /** Claim name for group list (e.g. "groups", "memberOf"). Default "groups". */
+  groupsClaim: string;
+  /** Claim name for display name. Default "name". */
+  nameClaim: string;
+  /** Claim name for email. Default "email". */
+  emailClaim: string;
+  /** Map OIDC group names to Seerr permission bitmask. */
+  groupMappings: OidcGroupMapping[];
+  /** Claim names to read from the ID token and store on the user (e.g. department, roles). */
+  claimsToSync: string[];
+  /** OAuth scopes to request (e.g. openid, profile, email). */
+  scopes: string[];
 }
 
 export interface ProxySettings {
@@ -184,6 +219,9 @@ interface FullPublicSettings extends PublicSettings {
   hideBlocklisted: boolean;
   localLogin: boolean;
   mediaServerLogin: boolean;
+  oidcLogin: boolean;
+  oidcDisplayName: string;
+  oidcScopes: string[];
   movie4kEnabled: boolean;
   series4kEnabled: boolean;
   discoverRegion: string;
@@ -353,6 +391,7 @@ export interface AllSettings {
   vapidPublic: string;
   vapidPrivate: string;
   main: MainSettings;
+  oidc: OidcSettings;
   plex: PlexSettings;
   jellyfin: JellyfinSettings;
   tautulli: TautulliSettings;
@@ -392,6 +431,7 @@ class Settings {
         hideBlocklisted: false,
         localLogin: true,
         mediaServerLogin: true,
+        oidcLogin: false,
         newPlexLogin: true,
         discoverRegion: '',
         streamingRegion: '',
@@ -403,6 +443,23 @@ class Settings {
         enableSpecialEpisodes: false,
         locale: 'en',
         youtubeUrl: '',
+      },
+      oidc: {
+        issuerUrl: '',
+        useDiscovery: true,
+        authorizationUrl: '',
+        tokenUrl: '',
+        userInfoUrl: '',
+        issuer: '',
+        clientId: '',
+        clientSecret: '',
+        displayName: 'SSO',
+        groupsClaim: 'groups',
+        nameClaim: 'name',
+        emailClaim: 'email',
+        groupMappings: [],
+        claimsToSync: [],
+        scopes: ['openid', 'profile', 'email'],
       },
       plex: {
         name: '',
@@ -609,6 +666,14 @@ class Settings {
     this.data.main = data;
   }
 
+  get oidc(): OidcSettings {
+    return this.data.oidc;
+  }
+
+  set oidc(data: OidcSettings) {
+    this.data.oidc = data;
+  }
+
   get plex(): PlexSettings {
     return this.data.plex;
   }
@@ -674,6 +739,11 @@ class Settings {
       hideBlocklisted: this.data.main.hideBlocklisted,
       localLogin: this.data.main.localLogin,
       mediaServerLogin: this.data.main.mediaServerLogin,
+      oidcLogin: this.data.main.oidcLogin,
+      oidcDisplayName: this.data.oidc.displayName || 'SSO',
+      oidcScopes: Array.isArray(this.data.oidc.scopes)
+        ? this.data.oidc.scopes
+        : ['openid', 'profile', 'email'],
       jellyfinExternalHost: this.data.jellyfin.externalHostname,
       jellyfinForgotPasswordUrl: this.data.jellyfin.jellyfinForgotPasswordUrl,
       movie4kEnabled: this.data.radarr.some(

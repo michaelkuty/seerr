@@ -190,6 +190,7 @@ app
         })
       );
       server.use((req, res, next) => {
+        // XSRF-TOKEN intentionally not httpOnly: client must read it for CSRF double-submit (e.g. X-XSRF-TOKEN header)
         res.cookie('XSRF-TOKEN', req.csrfToken(), {
           sameSite: true,
           secure: !dev,
