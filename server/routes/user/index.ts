@@ -689,6 +689,18 @@ router.post(
         });
 
         if (existingByJfId) {
+          // Ensure userType is set even if already linked
+          if (!existingByJfId.userType || existingByJfId.userType === UserType.OIDC) {
+            const fullUser = await userRepository.findOne({ where: { id: existingByJfId.id } });
+            if (fullUser) {
+              fullUser.userType =
+                settings.main.mediaServerType === MediaServerType.JELLYFIN
+                  ? UserType.JELLYFIN
+                  : UserType.EMBY;
+              await userRepository.save(fullUser);
+              createdUsers.push(fullUser);
+            }
+          }
           continue;
         }
 
@@ -714,6 +726,12 @@ router.post(
             `BOT_seerr_${jellyfinUser?.Name ?? ''}`
           ).toString('base64');
           existingByEmail.avatar = `/avatarproxy/${jellyfinUser?.Id}`;
+          if (!existingByEmail.userType || existingByEmail.userType === UserType.OIDC) {
+            existingByEmail.userType =
+              settings.main.mediaServerType === MediaServerType.JELLYFIN
+                ? UserType.JELLYFIN
+                : UserType.EMBY;
+          }
           await userRepository.save(existingByEmail);
           createdUsers.push(existingByEmail);
         } else {
