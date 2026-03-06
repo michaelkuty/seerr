@@ -3978,6 +3978,18 @@ paths:
                           type: string
                         accountId:
                           type: string
+  /auth/oidc:
+    get:
+      summary: Initiate OIDC sign-in
+      description: Redirects the user to the configured OIDC provider for authentication.
+      security: []
+      tags:
+        - auth
+      responses:
+        '302':
+          description: Redirect to OIDC provider
+        '307':
+          description: Redirect to login on failure
   /auth/oidc/sync:
     get:
       summary: OIDC callback sync
