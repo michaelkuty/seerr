@@ -3997,6 +3997,19 @@ paths:
       security: []
       tags:
         - auth
+      parameters:
+        - in: query
+          name: code
+          schema:
+            type: string
+          required: true
+          description: Authorization code from the OIDC provider
+        - in: query
+          name: state
+          schema:
+            type: string
+          required: true
+          description: State parameter for CSRF protection
       responses:
         '302':
           description: Redirect to application root
