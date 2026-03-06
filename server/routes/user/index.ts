@@ -654,25 +654,27 @@ router.post(
       const userRepository = getRepository(User);
       const body = req.body as { jellyfinUserIds: string[] };
 
-      // taken from auth.ts
-      const admin = await userRepository.findOneOrFail({
+      // Try to find a user with jellyfinUserId set (prefer admin, fallback to any)
+      let adminJellyfinUserId = '';
+      let adminDeviceId = 'BOT_seerr';
+      const admin = await userRepository.findOne({
         where: { id: 1 },
         select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
-        order: { id: 'ASC' },
       });
+      if (admin?.jellyfinUserId) {
+        adminJellyfinUserId = admin.jellyfinUserId;
+        adminDeviceId = admin.jellyfinDeviceId ?? 'BOT_seerr';
+      }
 
       const hostname = getHostname();
       const jellyfinClient = new JellyfinAPI(
         hostname,
         settings.jellyfin.apiKey,
-        admin.jellyfinDeviceId ?? ''
+        adminDeviceId
       );
-      jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
+      jellyfinClient.setUserId(adminJellyfinUserId);
 
-      //const jellyfinUsersResponse = await jellyfinClient.getUsers();
       const createdUsers: User[] = [];
-
-      jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
       const jellyfinUsers = await jellyfinClient.getUsers();
 
       for (const jellyfinUserId of body.jellyfinUserIds) {
@@ -680,12 +682,41 @@ router.post(
           (user) => user.Id === jellyfinUserId
         );
 
-        const user = await userRepository.findOne({
+        // Check if already linked by jellyfinUserId
+        const existingByJfId = await userRepository.findOne({
           select: ['id', 'jellyfinUserId'],
           where: { jellyfinUserId: jellyfinUserId },
         });
 
-        if (!user) {
+        if (existingByJfId) {
+          continue;
+        }
+
+        // Try to match existing user by email or username (e.g. OIDC user)
+        const existingByEmail = jellyfinUser?.Name
+          ? await userRepository
+              .createQueryBuilder('user')
+              .where(
+                'LOWER(user.email) = LOWER(:email) OR LOWER(user.username) = LOWER(:username)',
+                {
+                  email: jellyfinUser.Name,
+                  username: jellyfinUser.Name,
+                }
+              )
+              .getOne()
+          : null;
+
+        if (existingByEmail) {
+          // Link existing user (e.g. OIDC) to Jellyfin
+          existingByEmail.jellyfinUsername = jellyfinUser?.Name ?? null;
+          existingByEmail.jellyfinUserId = jellyfinUser?.Id ?? null;
+          existingByEmail.jellyfinDeviceId = Buffer.from(
+            `BOT_seerr_${jellyfinUser?.Name ?? ''}`
+          ).toString('base64');
+          existingByEmail.avatar = `/avatarproxy/${jellyfinUser?.Id}`;
+          await userRepository.save(existingByEmail);
+          createdUsers.push(existingByEmail);
+        } else {
           const newUser = new User({
             jellyfinUsername: jellyfinUser?.Name,
             jellyfinUserId: jellyfinUser?.Id,
