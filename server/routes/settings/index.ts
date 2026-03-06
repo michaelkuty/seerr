@@ -551,18 +551,25 @@ settingsRoutes.get('/jellyfin/users', async (req, res) => {
   const settings = getSettings();
 
   const userRepository = getRepository(User);
-  const admin = await userRepository.findOneOrFail({
+  let adminDeviceId = 'BOT_seerr';
+  let adminJellyfinUserId = '';
+  const admin = await userRepository.findOne({
     select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
     where: { id: 1 },
-    order: { id: 'ASC' },
   });
+  if (admin?.jellyfinDeviceId) {
+    adminDeviceId = admin.jellyfinDeviceId;
+  }
+  if (admin?.jellyfinUserId) {
+    adminJellyfinUserId = admin.jellyfinUserId;
+  }
   const jellyfinClient = new JellyfinAPI(
     getHostname(),
     settings.jellyfin.apiKey,
-    admin.jellyfinDeviceId ?? ''
+    adminDeviceId
   );
 
-  jellyfinClient.setUserId(admin.jellyfinUserId ?? '');
+  jellyfinClient.setUserId(adminJellyfinUserId);
   const resp = await jellyfinClient.getUsers();
   const users = resp.users.map((user) => ({
     username: user.Name,
