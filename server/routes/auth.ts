@@ -148,6 +148,12 @@ async function findOrCreateSeerrUserFromOidc(
       changed = true;
     }
     if (changed) await userRepository.save(user);
+    // Auto-link to Jellyfin on subsequent logins if not yet linked
+    if (!user.jellyfinUserId) {
+      await autoLinkJellyfinUser(user);
+      // Reload to get updated fields
+      user = (await userRepository.findOne({ where: { id: user.id } }))!;
+    }
     return user;
   }
 
@@ -164,6 +170,11 @@ async function findOrCreateSeerrUserFromOidc(
         user.permissions = permissionsFromGroups;
       if (oidcClaims !== null) user.oidcClaims = oidcClaims;
       await userRepository.save(user);
+      // Auto-link to Jellyfin if not yet linked
+      if (!user.jellyfinUserId) {
+        await autoLinkJellyfinUser(user);
+        user = (await userRepository.findOne({ where: { id: user.id } }))!;
+      }
       return user;
     }
   }
@@ -189,7 +200,79 @@ async function findOrCreateSeerrUserFromOidc(
     oidcClaims: oidcClaims ?? undefined,
   });
   await userRepository.save(newUser);
+
+  // Auto-link to Jellyfin user
+  await autoLinkJellyfinUser(newUser);
+
   return newUser;
+}
+
+async function autoLinkJellyfinUser(user: User): Promise<void> {
+  if (user.jellyfinUserId) return; // already linked
+
+  const settings = getSettings();
+  if (
+    settings.main.mediaServerType !== MediaServerType.JELLYFIN &&
+    settings.main.mediaServerType !== MediaServerType.EMBY
+  ) {
+    return;
+  }
+
+  try {
+    const userRepository = getRepository(User);
+    const admin = await userRepository.findOne({
+      where: { id: 1 },
+      select: ['id', 'jellyfinDeviceId', 'jellyfinUserId'],
+    });
+
+    const deviceId = admin?.jellyfinDeviceId || 'BOT_seerr';
+    const jellyfinClient = new JellyfinAPI(
+      getHostname(),
+      settings.jellyfin.apiKey,
+      deviceId
+    );
+
+    const { users: jellyfinUsers } = await jellyfinClient.getUsers();
+    const normalizedEmail = user.email?.toLowerCase() ?? '';
+    const normalizedUsername = user.username?.toLowerCase() ?? '';
+
+    const matchedJfUser = jellyfinUsers.find((jfUser) => {
+      const jfName = jfUser.Name?.toLowerCase() ?? '';
+      return (
+        (normalizedEmail && jfName === normalizedEmail) ||
+        (normalizedUsername && jfName === normalizedUsername)
+      );
+    });
+
+    if (matchedJfUser) {
+      user.jellyfinUserId = matchedJfUser.Id;
+      user.jellyfinUsername = matchedJfUser.Name;
+      if (
+        !user.userType ||
+        user.userType === UserType.OIDC
+      ) {
+        user.userType =
+          settings.main.mediaServerType === MediaServerType.JELLYFIN
+            ? UserType.JELLYFIN
+            : UserType.EMBY;
+      }
+      await userRepository.save(user);
+      logger.info(
+        `Auto-linked OIDC user "${user.email}" to Jellyfin user "${matchedJfUser.Name}" (${matchedJfUser.Id})`,
+        { label: 'Auth' }
+      );
+    } else {
+      logger.debug(
+        `No matching Jellyfin user found for OIDC user "${user.email}"`,
+        { label: 'Auth' }
+      );
+    }
+  } catch (e) {
+    logger.warn(
+      `Failed to auto-link OIDC user to Jellyfin: ${(e as Error).message}`,
+      { label: 'Auth' }
+    );
+  }
 }
 
 authRoutes.get('/oidc', async (req, res) => {
